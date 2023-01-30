@@ -1,8 +1,8 @@
 package transport
 
 import (
+	"fmt"
 	"net"
-	"strconv"
 
 	"github.com/assemblaj/ggpo/internal/messages"
 	"github.com/assemblaj/ggpo/internal/util"
@@ -18,7 +18,7 @@ type Udp struct {
 
 	socket         net.Conn
 	messageHandler MessageHandler
-	listener       net.PacketConn
+	listener       *net.UDPConn
 	localPort      int
 	ipAddress      string
 }
@@ -49,11 +49,17 @@ func (u Udp) Close() {
 func NewUdp(messageHandler MessageHandler, localPort int) Udp {
 	u := Udp{}
 	u.messageHandler = messageHandler
-	portStr := strconv.Itoa(localPort)
 
 	u.localPort = localPort
 	util.Log.Printf("binding udp socket to port %d.\n", localPort)
-	u.listener, _ = net.ListenPacket("udp", "0.0.0.0:"+portStr)
+	udpAddr, err := net.ResolveUDPAddr("udp", fmt.Sprintf(":%d", localPort))
+	if err != nil {
+		panic(err) // TODO Handle error4
+	}
+	u.listener, err = net.ListenUDP("udp", udpAddr)
+	if err != nil {
+		panic(err) // TODO Handle error
+	}
 	return u
 }
 
@@ -65,23 +71,29 @@ func (u Udp) SendTo(msg messages.UDPMessage, remoteIp string, remotePort int) {
 		return
 	}
 
-	RemoteEP := net.UDPAddr{IP: net.ParseIP(remoteIp), Port: remotePort}
+	remote, err := net.ResolveUDPAddr("udp", fmt.Sprintf("%s:%d", remoteIp, remotePort))
+	if err != nil {
+		panic(err) // TODO Handle error
+	}
 	buf := msg.ToBytes()
-	u.listener.WriteTo(buf, &RemoteEP)
+	_, err = u.listener.WriteToUDP(buf, remote)
+	if err != nil {
+		panic(err) // TODO Handle error
+	}
 }
 
 func (u Udp) Read(messageChan chan MessageChannelItem) {
 	defer u.listener.Close()
 	recvBuf := make([]byte, MaxUDPPacketSize*2)
 	for {
-		len, addr, err := u.listener.ReadFrom(recvBuf)
+		l, addr, err := u.listener.ReadFromUDP(recvBuf)
 		if err != nil {
 			util.Log.Printf("conn.Read error returned: %s\n", err)
 			break
-		} else if len <= 0 {
+		} else if l <= 0 {
 			util.Log.Printf("no data recieved\n")
-		} else if len > 0 {
-			util.Log.Printf("recvfrom returned (len:%d  from:%s).\n", len, addr.String())
+		} else if l > 0 {
+			util.Log.Printf("recvfrom returned (len:%d  from:%s).\n", l, addr.String())
 			peer := getPeerAddress(addr)
 
 			msg, err := messages.DecodeMessageBinary(recvBuf)
@@ -89,7 +101,7 @@ func (u Udp) Read(messageChan chan MessageChannelItem) {
 				util.Log.Printf("Error decoding message: %s", err)
 				continue
 			}
-			messageChan <- MessageChannelItem{Peer: peer, Message: msg, Length: len}
+			messageChan <- MessageChannelItem{Peer: peer, Message: msg, Length: l}
 		}
 
 	}
